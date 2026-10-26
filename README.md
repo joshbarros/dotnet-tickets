@@ -235,3 +235,6 @@ Nx 23.2.1 orchestrates `nx build web`, `nx lint web`, `nx typecheck web` and `nx
 - [dotnet-academy](https://github.com/joshbarros/dotnet-academy): course cohort seats and enrollments.
 - [dotnet-compute](https://github.com/joshbarros/dotnet-compute): GPU-hour reservations in a pool.
 - [dotnet-hotel](https://github.com/joshbarros/dotnet-hotel): hotel room-nights.
+- [dotnet-carbon](https://github.com/joshbarros/dotnet-carbon): carbon credit batches and purchases.
+- [dotnet-charging](https://github.com/joshbarros/dotnet-charging): EV charger slot reservations.
+- [dotnet-promo](https://github.com/joshbarros/dotnet-promo): limited-use promo codes and redemptions.
