@@ -1,59 +1,76 @@
-using Tickets.Api.Data;
-using Tickets.Api.Messaging;
-using Tickets.Api.Middleware;
-using Tickets.Api.Modules.Orders;
-using Tickets.Api.Modules.Tiers;
-using Tickets.Api.Modules.ETickets;
-using Microsoft.EntityFrameworkCore;
+using Tickets.Orders;
+using Tickets.Tiers;
+using Tickets.ETickets;
+using Tickets.Identity;
+using Tickets.Shared;
+using Tickets.Shared.Auth;
+using Tickets.Shared.Http;
+using Tickets.Shared.Messaging;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
+var config = builder.Configuration;
 
-builder.Services.AddControllers().AddJsonOptions(o => o.JsonSerializerOptions.PropertyNameCaseInsensitive = true);
+if (config.GetValue("Logging:Json", false))
+    builder.Logging.AddJsonConsole(o =>
+    {
+        o.IncludeScopes = true;
+        o.UseUtcTimestamp = true;
+    });
+
+builder.Services.AddControllers()
+    .AddJsonOptions(o => o.JsonSerializerOptions.PropertyNameCaseInsensitive = true)
+    .AddApplicationPart(typeof(IdentityModule).Assembly)
+    .AddApplicationPart(typeof(OrdersModule).Assembly)
+    .AddApplicationPart(typeof(TiersModule).Assembly)
+    .AddApplicationPart(typeof(ETicketsModule).Assembly);
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi();
+builder.Services.AddTicketsAuthorization();
 
-var connectionString = builder.Configuration.GetConnectionString("Tickets")
-    ?? throw new InvalidOperationException("Connection string 'Tickets' is not configured.");
-builder.Services.AddDbContext<TicketsDbContext>(options => options.UseNpgsql(connectionString));
+builder.Services.AddIdentityModule(config);
+var messaging = builder.Services.AddMessaging(config);
+builder.Services.AddOrdersModule(config, messaging);
+builder.Services.AddTiersModule(config, messaging);
+builder.Services.AddETicketsModule(config, messaging);
+messaging.Start();
 
-builder.Services.Configure<RabbitOptions>(builder.Configuration.GetSection("RabbitMq"));
-builder.Services.Configure<KafkaOptions>(builder.Configuration.GetSection("Kafka"));
-builder.Services.Configure<OrderOptions>(builder.Configuration.GetSection("Orders"));
-builder.Services.AddSingleton<RabbitConnection>();
-builder.Services.AddSingleton<KafkaLog>();
-
-builder.Services.AddScoped<OrderService>();
-builder.Services.AddScoped<TiersHandler>();
-builder.Services.AddScoped<ETicketsHandler>();
-builder.Services.AddScoped<OrdersHandler>();
-
-builder.Services.AddHostedService<OutboxRelay>();
-builder.Services.AddHostedService(sp => new ModuleConsumer<TiersHandler>(
-    sp.GetRequiredService<IServiceScopeFactory>(), sp.GetRequiredService<RabbitConnection>(),
-    new ConsumerSpec(Topology.TiersQueue, [Topology.ReserveKey, Topology.ReleaseKey], Prefetch: 1),
-    sp.GetRequiredService<ILogger<ModuleConsumer<TiersHandler>>>()));
-builder.Services.AddHostedService(sp => new ModuleConsumer<ETicketsHandler>(
-    sp.GetRequiredService<IServiceScopeFactory>(), sp.GetRequiredService<RabbitConnection>(),
-    new ConsumerSpec(Topology.ETicketsQueue, [Topology.HeldKey], Prefetch: 4),
-    sp.GetRequiredService<ILogger<ModuleConsumer<ETicketsHandler>>>()));
-builder.Services.AddHostedService(sp => new ModuleConsumer<OrdersHandler>(
-    sp.GetRequiredService<IServiceScopeFactory>(), sp.GetRequiredService<RabbitConnection>(),
-    new ConsumerSpec(Topology.OrdersQueue,
-        [Topology.HeldKey, Topology.ShortKey, Topology.IssuedKey, Topology.RejectedKey, Topology.ReleasedKey], Prefetch: 4),
-    sp.GetRequiredService<ILogger<ModuleConsumer<OrdersHandler>>>()));
+if (config.GetValue("ForwardedHeaders:Enabled", false))
+    builder.Services.Configure<ForwardedHeadersOptions>(o =>
+    {
+        // Behind the nginx container the real client address arrives in X-Forwarded-For. Trusting every proxy is only safe
+        // when the API is reachable through the proxy alone; restrict KnownNetworks to the proxy's network in production.
+        o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        o.KnownIPNetworks.Clear();
+        o.KnownProxies.Clear();
+    });
 
 var app = builder.Build();
 
-app.UseMiddleware<ExceptionHandler>();
-app.MapControllers();
-app.MapOpenApi();
-app.MapScalarApiReference();
-app.MapGet("/api/health", () => Results.Text("Healthy"));
+if (config.GetValue("ForwardedHeaders:Enabled", false))
+    app.UseForwardedHeaders();
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<SecurityHeadersMiddleware>();
+app.UseMiddleware<ExceptionMiddleware>();
+app.UseStatusCodePages();
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
 
-using (var scope = app.Services.CreateScope())
+app.MapControllers();
+app.MapGet("/api/health", () => Results.Text("Healthy")).AllowAnonymous();
+app.MapHealthChecks("/api/health/ready", new HealthCheckOptions { Predicate = r => r.Tags.Contains("ready") }).AllowAnonymous();
+if (config.GetValue("Docs:Public", false))
 {
-    await scope.ServiceProvider.GetRequiredService<TicketsDbContext>().Database.MigrateAsync();
+    app.MapOpenApi().AllowAnonymous();
+    app.MapScalarApiReference().AllowAnonymous();
 }
 
+foreach (var migrator in app.Services.GetServices<IModuleMigrator>().OrderBy(m => m.Order))
+    await migrator.MigrateAsync(app.Services, CancellationToken.None);
+
 app.Run();
+
+public partial class Program;

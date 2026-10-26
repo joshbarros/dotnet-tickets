@@ -15,6 +15,7 @@ export type OrderStatus = 'Requested' | 'Held' | 'Sold' | 'Refunded' | 'Rejected
 export interface Order {
   id: string;
   tierCode: string;
+  ownerId: string;
   reference: string;
   tickets: number;
   totalCents: number;
@@ -31,4 +32,16 @@ export interface LogEntry {
   type: string;
   module: string;
   occurredAt: string;
+}
+
+export interface UserInfo {
+  id: string;
+  email: string;
+  roles: string[];
+}
+
+export interface AuthResponse {
+  accessToken: string;
+  expiresAt: string;
+  user: UserInfo;
 }

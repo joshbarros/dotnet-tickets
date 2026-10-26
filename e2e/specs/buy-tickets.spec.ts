@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { ADMIN, adminToken, signIn } from './support';
 
 test('add a tier, buy tickets, see the e-ticket, refund it', async ({ page }) => {
   const run = Date.now().toString(36).toUpperCase();
   const code = `E2E-${run}`;
   const reference = `BUYER-${run}`;
 
-  await page.goto('/');
+  await signIn(page, ADMIN);
   await page.getByLabel('Tier code').fill(code);
   await page.getByLabel('Tickets on sale').fill('8');
   await page.getByRole('button', { name: 'Add tier' }).click();
@@ -24,8 +25,12 @@ test('add a tier, buy tickets, see the e-ticket, refund it', async ({ page }) =>
   await expect(remaining).toHaveText('5');
 
   // Nothing is kept in the browser: a fresh load reads the same state from the API.
-  await page.evaluate(() => localStorage.clear());
+  // Nothing sensitive is stored either: the refresh cookie is HttpOnly, so a reload signs back in through it.
+  expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).toBe(
+    '{}',
+  );
   await page.reload();
+  await expect(page.getByTestId('whoami')).toContainText(ADMIN.email);
   await page.getByRole('button', { name: new RegExp(`^${code}`) }).click();
   const reloaded = page.locator(`tr[data-reference="${reference}"]`);
   await expect(reloaded.getByTestId('status')).toHaveText('Sold');
@@ -36,8 +41,9 @@ test('add a tier, buy tickets, see the e-ticket, refund it', async ({ page }) =>
   await expect(page.getByTestId('selected-remaining')).toHaveText('8');
   // The issued eticket is not rolled back.
   await expect(reloaded.getByTestId('eticket')).toHaveText(/ET-[0-9A-F]{12}/);
-  const orders = await page.request.get(`/api/orders?tierCode=${code}`);
+  const headers = { Authorization: `Bearer ${await adminToken(page.request)}` };
+  const orders = await page.request.get(`/api/orders?tierCode=${code}`, { headers });
   const [order] = await orders.json();
-  const eticket = await page.request.get(`/api/e-tickets/${order.id}`);
+  const eticket = await page.request.get(`/api/e-tickets/${order.id}`, { headers });
   expect((await eticket.json()).status).toBe('Issued');
 });
