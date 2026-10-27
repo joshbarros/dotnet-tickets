@@ -63,7 +63,7 @@ public class OrderService(OrdersDbContext db, ITierCatalog tiers, ICurrentUser u
         return order;
     }
 
-    public async Task<List<Order>> ListAsync(string? tierCode, CancellationToken ct)
+    public async Task<(List<Order> Items, int Total)> ListAsync(string? tierCode, int page, int pageSize, CancellationToken ct)
     {
         var query = db.Orders.AsNoTracking();
         if (!user.IsStaff)
@@ -73,7 +73,9 @@ public class OrderService(OrdersDbContext db, ITierCatalog tiers, ICurrentUser u
         }
         if (!string.IsNullOrWhiteSpace(tierCode))
             query = query.Where(b => b.TierCode == tierCode);
-        return await query.OrderByDescending(b => b.CreatedAt).Take(100).ToListAsync(ct);
+        var total = await query.CountAsync(ct);
+        var items = await query.OrderByDescending(b => b.CreatedAt).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        return (items, total);
     }
 
     /// <summary>Moves Held or Sold to Refunded and asks Tiers to give the tickets back. The eticket is not touched.</summary>

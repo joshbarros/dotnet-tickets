@@ -19,10 +19,14 @@ public class OrdersController(OrderService service, KafkaLog kafka) : Controller
         return Accepted($"/api/orders/{order.Id}", OrderDto.From(order));
     }
 
-    /// <summary>Your orders. Staff see everyone's.</summary>
+    /// <summary>Your orders, newest first, a page at a time (default 100, at most 100). Staff see everyone's. The total is in X-Total-Count.</summary>
     [HttpGet]
-    public async Task<IEnumerable<OrderDto>> List([FromQuery] string? tierCode, CancellationToken ct) =>
-        (await service.ListAsync(tierCode, ct)).Select(OrderDto.From);
+    public async Task<IEnumerable<OrderDto>> List([FromQuery] string? tierCode, [FromQuery] int page = 1, [FromQuery] int pageSize = 100, CancellationToken ct = default)
+    {
+        var (items, total) = await service.ListAsync(tierCode, Math.Max(page, 1), Math.Clamp(pageSize, 1, 100), ct);
+        Response.Headers["X-Total-Count"] = total.ToString();
+        return items.Select(OrderDto.From);
+    }
 
     [HttpGet("{id:guid}")]
     public async Task<OrderDto> Get(Guid id, CancellationToken ct) => OrderDto.From(await service.GetAsync(id, ct));
