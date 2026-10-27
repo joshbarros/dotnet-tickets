@@ -79,7 +79,7 @@ flowchart TB
     api["apps/api: composition root, middleware, endpoints"]
     api --> identity & orders & tickets & etickets
     identity["libs/identity: users, roles, JWT, refresh tokens"]
-    orders["libs/orders: scheman orders"]
+    orders["libs/orders: schema orders"]
     tickets["libs/tiers: schema tickets"]
     etickets["libs/etickets: schema etickets"]
     identity & orders & tickets & etickets --> shared["libs/shared: messaging, outbox/inbox, auth primitives, middleware"]
@@ -96,7 +96,7 @@ Modules still talk only through messages: RabbitMQ carries the commands, Kafka k
 | Access token | JWT (HS256), 15 minutes, held **in memory** by the Angular app and sent as `Authorization: Bearer`. The signing key must be at least 32 bytes; the API refuses to start without one. |
 | Refresh token | 256 random bits in an `HttpOnly`, `SameSite=Strict`, `Path=/api/auth` cookie (`Secure` over HTTPS). Only its SHA-256 is stored. Every refresh **rotates** it with a conditional `UPDATE`, so two concurrent refreshes with the same token cannot both win. Presenting a token that was already used revokes the whole family. Refresh and logout also need an `X-Requested-With: tickets-web` header, so another site cannot trigger them. |
 | Roles | `Customer` (default at registration), `Staff`, `Admin`. An administrator is seeded from configuration on first start. |
-| Rules | Anonymous: `/api/health`, `/api/auth/*`. Any signed-in user: read tiers, book, read and refund **their own** orders and etickets. `Staff` and `Admin`: open tiers, read everything, read the event log. Another user's order or eticket is `404`, not `403`, so ids do not leak. The owner of a order is the caller; a body field cannot set it. |
+| Rules | Anonymous: `/api/health`, `/api/auth/*`. Any signed-in user: read tiers, book, read and refund **their own** orders and etickets. `Staff` and `Admin`: open tiers, read everything, read the event log. Another user's order or eticket is `404`, not `403`, so ids do not leak. The owner of an order is the caller; a body field cannot set it. |
 | Hardening | Rate limit on `/api/auth/*` per client (`RateLimit:AuthPerMinute`), security headers on every response (`nosniff`, `DENY`, strict CSP, `no-referrer`), a correlation id echoed in `X-Correlation-Id` and in every problem response, JSON logs (`Logging:Json`), forwarded headers only when `ForwardedHeaders:Enabled`, a fallback policy that makes every endpoint authenticated unless it opts out, and a readiness endpoint that checks every module schema. |
 
 ## Run it
@@ -105,7 +105,7 @@ Needs Node 22 (npm 10), .NET SDK 10.0.401 (`global.json`), Docker (arm64 is fine
 
 ```bash
 npm ci
-dotnet test tests/Tickets.UnitTests   # 110 tests, no Docker
+dotnet test tests/Tickets.UnitTests   # 111 tests, no Docker
 docker compose up -d --wait db        # the integration tests use Postgres on 5477 (database tickets_test)
 docker compose exec db createdb -U tickets tickets_test   # once
 dotnet test tests/Tickets.IntegrationTests
@@ -135,26 +135,29 @@ API=http://127.0.0.1:5217
 login() { curl -s -X POST $API/api/auth/login -H 'content-type: application/json' -d "{\"email\":\"$1\",\"password\":\"$2\"}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])'; }
 ADMIN="Authorization: Bearer $(login admin@tickets.local TicketsAdmin2026)"
 
-curl -s -X POST $API/api/tiers -H "$ADMIN" -H 'content-type: application/json' \
-  -d '{"code":"NIGHT1-FLOOR","name":"Night One","section":"Floor","venue":"Arena Norte","ticketsTotal":10}'
-
 curl -s -X POST $API/api/auth/register -H 'content-type: application/json' \
   -d '{"email":"ana@example.com","password":"Passw0rd-Demo1"}'      # 201; its accessToken goes in $ANA below
 ANA="Authorization: Bearer <accessToken>"
 
-curl -s -X POST $API/api/orders -H "$ANA" -H 'content-type: application/json' \
-  -d '{"tierCode":"NIGHT1-FLOOR","reference":"BUYER-1001","tickets":3}'
-# 202, status Requested. Use the returned id:
+curl -s -H "$ADMIN" -X POST $API/api/tiers \
+  -H 'content-type: application/json' \
+  -d '{"code":"NIGHT1-FLOOR","name":"Night One","section":"Floor","venue":"Arena Norte","ticketsTotal":8,"priceCents":8000}'
 
-curl -s -H "$ANA" $API/api/orders/<id>             # Sold after a few seconds, with an e-ticket number
+curl -s -H "$ANA" -X POST $API/api/orders \
+  -H 'content-type: application/json' \
+  -d '{"tierCode":"NIGHT1-FLOOR","reference":"BUYER-1001","tickets":4}'
+# 202, status Requested, totalCents 35840. Use the returned id:
+
+curl -s -H "$ANA" $API/api/orders/<id>               # Sold after a few seconds, with an e-ticket number
 curl -s -H "$ANA" $API/api/e-tickets/<id>
-curl -s -H "$ANA" $API/api/tiers/NIGHT1-FLOOR     # ticketsLeft 4
-curl -s -H "$ADMIN" $API/api/orders/<id>/events    # the Kafka log; staff only (a customer gets 403)
+curl -s -H "$ANA" $API/api/tiers/NIGHT1-FLOOR        # ticketsLeft 4
+curl -s -H "$ADMIN" $API/api/orders/<id>/events        # the Kafka log for this order
 
-curl -s -X POST -H "$ANA" $API/api/orders/<id>/refund   # tickets go back; the e-ticket stays
+curl -s -H "$ANA" -X POST $API/api/orders/<id>/refund \
+  -H 'content-type: application/json'                       # tickets go back on sale; the e-ticket stays
 ```
 
-A order is validated at the door: reference required (at most 40 characters), tickets from 1 to 6 tickets. The poison match is a case-sensitive substring: `BUYER-POISON-7` and any longer token containing `POISON` match.
+An order is validated at the door: buyer reference required (at most 40 characters), 1 to 6 tickets. The poison match is a case-sensitive substring: `BUYER-POISON-7` and any longer token containing `POISON` match.
 
 ## Develop with Nx
 
@@ -171,7 +174,7 @@ npx nx build web && npx nx build api            # what CI builds
 
 ## What is tested, and where it runs
 
-- **Unit tests** (`tests/Tickets.UnitTests`, 110 tests, no Docker, about 3 seconds): the order rules and fee, the poison rule including integer overflow, token creation and validation, password and lockout behaviour of the auth service on an in-memory store, owner-or-staff access, the retry policy and topology, message serialization, the outbox `DbContext` conventions, and the HTTP middleware (problem details are `application/problem+json`, security headers, correlation ids).
+- **Unit tests** (`tests/Tickets.UnitTests`, 111 tests, no Docker, about 3 seconds): the order rules and fee, the poison rule including integer overflow, token creation and validation, password and lockout behaviour of the auth service on an in-memory store, owner-or-staff access, the retry policy and topology, message serialization, the outbox `DbContext` conventions, and the HTTP middleware (problem details are `application/problem+json`, security headers, correlation ids).
 - **Integration tests** (`tests/Tickets.IntegrationTests`, 48 tests, real Postgres): the tickets race (two tasks, two `DbContext`s, one unit: one `Held`, one `Short`, no hold for the loser) and the check constraint behind it; the saga handlers against the real schema (duplicate delivery claimed once, a release returns the tickets once, the poison rejection committed before the dead-letter, refund then late final mark); and the **whole HTTP pipeline** through `WebApplicationFactory`: register, login, wrong password, lockout, expired and tampered tokens, refresh rotation, replay revoking the family, two concurrent refreshes (exactly one wins), logout, the same-section header, the auth rate limit, and 401/403/404 for every route and ownership case. The race test was run against a read-then-write version of the hold, where it failed, and against the conditional update, where it passes.
 - **`scripts/smoke.sh`** drives the composed stack: authentication and ownership first (401, 403, 404), then validation, the happy path (fee, e-ticket, Kafka log), the last ticket with three concurrent orders, the poison reference (rejected, `etickets.work.dlq` gains one message, tickets restored), and a refund that lands between the e-ticket and the final mark. To make that last window wide enough to hit on purpose, Compose sets `Orders__FinalMarkDelayMs=1500`; it is a latency knob and defaults to 0.
 - **Playwright** (`e2e/specs`, 11 tests, Chromium): `auth.spec.ts` (anonymous sees only the form, wrong password, password policy, a customer books and sees only their own orders with no staff controls, sign-out, the session surviving a reload through the cookie while `document.cookie` stays empty); `buy-tickets.spec.ts` (open a tier, book, e-ticket, reload, refund); `ui-flows.spec.ts` (refusal messages, the poison rejection, the loser of a race, the Kafka event log). They run against the composed web port and against the Nx dev servers.
@@ -264,7 +267,7 @@ apps/api       thin host: composition root, middleware, endpoints
 apps/web       Angular 21, styled with Tailwind 4 utilities only (sign-in, role-aware workspace)
 libs/shared    messaging (outbox, inbox, relay, consumers), auth primitives, middleware
 libs/identity  users, roles, JWT, refresh tokens          (schema identity)
-libs/orders  order rules and the saga's first step    (scheman orders)
+libs/orders  order rules and the saga's first step    (schema orders)
 libs/tiers  the only writer of the tickets left     (schema tickets)
 libs/etickets e-tickets                            (schema etickets)
 tests/         Tickets.UnitTests, Tickets.IntegrationTests
